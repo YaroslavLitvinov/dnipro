@@ -3,6 +3,7 @@ import psycopg2
 import json, httplib, urllib
 import argparse
 import copy
+import dbproxy
 
 #dict keys
 CONN_ID = "connector id"
@@ -23,56 +24,6 @@ DB_USER_NAME = "db user name"
 JOB_ID = "job id"
 HDFS_PATH="hdfs path"
 PRIMARY_KEY = "primary key"
-
-
-def psql_tables_list(psql_conn, schema):
-    l = []
-    cur = psql_conn.cursor()
-    try:
-        cur.execute("SELECT table_name FROM information_schema.tables \
-        WHERE table_schema = '%s';" % schema)
-    except:
-        print "I can't list tables!"
-
-    rows = cur.fetchall()
-    for row in rows:
-        l.append(row[0])
-    return l
-
-def psql_table_primary_key(psql_conn, table_name):
-    l = []
-    cur = psql_conn.cursor()
-    try:
-        cur.execute("SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type \
-        FROM   pg_index i \
-        JOIN   pg_attribute a ON a.attrelid = i.indrelid \
-        AND a.attnum = ANY(i.indkey) \
-        WHERE  i.indrelid = '%s'::regclass \
-        AND    i.indisprimary;" % (table_name) )
-    except:
-        print "I can't list tables!"
-
-    rows = cur.fetchall()
-    if rows :
-        return rows[0][0]
-    else:
-        return None
-
-def psql_table_first_column(psql_conn, table_name):
-    l = []
-    cur = psql_conn.cursor()
-    try:
-        cur.execute("select column_name from information_schema.columns where \
-        table_name='%s';" % (table_name) )
-    except:
-        print "I can't list tables!"
-
-    rows = cur.fetchall()
-    if rows :
-        return rows[0][0]
-    else:
-        return None
-
 
 def issue_put_get_request(conn, reqtype, request):
     ts = int(time.time())
@@ -379,7 +330,7 @@ def create_sqoop_job(sqoop_conn, copy_from, copy_to):
             }
         }
     )
-    print issue_post_request(sqoop_conn, '/sqoop/v1/job/?user.name=xxx', body)
+    return issue_post_request(sqoop_conn, '/sqoop/v1/job/?user.name=xxx', body)
 
 
 
@@ -419,11 +370,12 @@ def get_submission_as_map(js_submission):
     else:
         return None
 
+def get_printable_create_job_error_message(js_error, table_name):
+    return "job %s creation failed. %s %s " % (table_name, js_error['error-code'], js_error['message'])
+
 def get_printable_submission_error_message(js_error, jobid, table_name):
     p = copy.copy(js_error)
     del p["stack-trace"]
-    if "cause" in p:
-        del p["cause"]["stack-trace"]
     return "job %d / %s submission failed. " % (jobid, table_name), p
 
 def get_printable_submission_status_message(js_status, table_name):
@@ -443,7 +395,7 @@ def handle_db_table_create_job(sqoop_conn, table_name, partit_column_name, t, f)
     from_db_copy[TABLE_NAME] = table_name #to be used as sql table name
     from_db_copy[PRIMARY_KEY] = partit_column_name
 
-    create_sqoop_job(sqoop_conn, from_db_copy, to_hdfs_copy )
+    return create_sqoop_job(sqoop_conn, from_db_copy, to_hdfs_copy )
 
 
 def find_table_in_sqoop_jobs_list(jobs, table_name):
@@ -454,14 +406,14 @@ def find_table_in_sqoop_jobs_list(jobs, table_name):
 
 def get_single_match_by(maps_array, conn_data, match_list):
     for item in maps_array:
-        if is_match_by(item, conn_data, match_list) != None:
+        if is_match_by(item, conn_data, match_list) is not None:
             return item
     return None
 
 def get_array_matches_by(maps_array, conn_data, match_list):
     l = []
     for item in maps_array:
-        if is_match_by(item, conn_data, match_list) != None:
+        if is_match_by(item, conn_data, match_list) is not None:
             l.append(item)
     return l
 
@@ -511,17 +463,14 @@ if __name__ == "__main__":
     parser.add_argument("--concurrent-jobs-count", help="How many jobs will be executed concurrently", type=int, required=True)
     args = parser.parse_args()
 
-    if args.dbpass == None:
-        args.dbpass = getpass.getpass("Enter psql password for user %s :\n" % args.dbuser )
+    if not args.dbpass:
+        args.dbpass = getpass.getpass("Enter db password for user %s :\n" % args.dbuser )
 
-    if args.dbhost_job == None:
+    if not args.dbhost_job:
         args.dbhost_job = args.dbhost
 
-    try:
-        psql_conn = psycopg2.connect("dbname='{0}' user='{1}' host='{2}' port={3} password='{4}'"
-                                     .format(args.dbname, args.dbuser, args.dbhost, args.dbport, args.dbpass ))
-    except:
-        sys.exit("I am unable to connect to the database")
+    db_proxy = dbproxy.create(args.dbtype, args.dbhost, args.dbport, args.dbname, args.dbuser, args.dbpass, args.dbschema)
+    db_proxy.open()
 
     to_hdfs = { CONN_ID : args.connector_to,
                 TO_CONN_ID : args.connector_to,
@@ -546,7 +495,7 @@ if __name__ == "__main__":
     #deal with links
     links = get_links_as_list_of_maps( get_links(sqoop_conn) )
     item = get_single_match_by(links, to_hdfs, [CONN_ID])
-    if item != None:
+    if item:
         to_hdfs[LINK_ID] = item[LINK_ID]
         to_hdfs[TO_LINK_ID] = item[LINK_ID]
     else:
@@ -554,28 +503,35 @@ if __name__ == "__main__":
 
     #ensure link exist
     item = get_single_match_by(links, from_db, [CONN_ID, DB_NAME, DB_TYPE_NAME])
-    if item == None:
+    if item is None:
         create_sqoop_link(sqoop_conn, from_db)        
         item = get_single_match_by( get_links_as_list_of_maps( get_links(sqoop_conn) ), 
                                     from_db, [CONN_ID, DB_NAME, DB_TYPE_NAME] )
-        if item == None:
+        if item is None:
             sys.exit("Can't create a link corresponding to 'FROM' connector")
 
     from_db[FROM_LINK_ID] = from_db[LINK_ID] = item[LINK_ID]
-    psql_tables = psql_tables_list(psql_conn, from_db[SCHEMA_NAME])
+    tables = db_proxy.tables()
 
     #get only jobs related to our database
     jobs = get_array_matches_by( get_jobs_as_list_of_maps( get_jobs(sqoop_conn) ), 
                                  from_db, [FROM_LINK_ID])
     #ensure that we have all jobs created
-    for table_name in psql_tables:
+    for table_name in tables:
         if find_table_in_sqoop_jobs_list(jobs, table_name) == False:
             print "add job", table_name
-            pk = psql_table_primary_key(psql_conn, table_name)
-            if pk == None:
-                pk = psql_table_first_column(psql_conn, table_name)
-            handle_db_table_create_job(sqoop_conn, table_name, pk, to_hdfs, from_db)
-    psql_conn.close()
+            pk = db_proxy.primary_key_of_table(table_name)
+            if pk is None:
+                columns = db_proxy.columns_of_table(table_name)
+                if columns:
+                    pk = columns[0]
+            #create job if table not in sqoop jobs list
+            js_res = handle_db_table_create_job(sqoop_conn, table_name, pk, to_hdfs, from_db)
+            if 'error-code' in js_res :
+                print get_printable_create_job_error_message(js_res, table_name)
+            else:
+                print js_res
+    db_proxy.close()
     #get only jobs related to specified database
     jobs = get_array_matches_by( get_jobs_as_list_of_maps( get_jobs(sqoop_conn) ), 
                                  from_db, [FROM_LINK_ID])
@@ -599,7 +555,7 @@ if __name__ == "__main__":
             job_status = start_job(sqoop_conn, job_to_start[JOB_ID])
             jobs_statuses[ job_to_start[JOB_ID] ] = job_status
             submission = get_submission_as_map( job_status )
-            if submission == None:
+            if submission is None:
                 error = job_status
                 print get_printable_submission_error_message(error, 
                                                              job_to_start[JOB_ID], 
