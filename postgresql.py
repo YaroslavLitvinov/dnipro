@@ -1,9 +1,11 @@
 from dbproxy import DbProxy
-import psycopg2
+
 
 class Postgresql(DbProxy):
-    def __init__(self, dbapi, dbtype, dbhost, dbport, dbname, dbuser, dbpass, schema):
-        DbProxy.__init__(self, dbapi, dbtype, dbhost, dbport, dbname, dbuser, dbpass, schema)
+    def __init__(self, dbapi, dbtype, dbhost, dbport, dbname,
+                 dbuser, dbpass, schema):
+        DbProxy.__init__(self, dbapi, dbtype, dbhost, dbport, dbname,
+                         dbuser, dbpass, schema)
 
     def tables(self):
         tables = []
@@ -25,10 +27,10 @@ class Postgresql(DbProxy):
         JOIN   pg_attribute a ON a.attrelid = i.indrelid \
         AND a.attnum = ANY(i.indkey) \
         WHERE  i.indrelid = '%s'::regclass \
-        AND    i.indisprimary;" % (table_name) )
-    
+        AND    i.indisprimary;" % (table_name))
+
         rows = cur.fetchall()
-        if rows :
+        if rows:
             return rows[0][0]
         else:
             return None
@@ -38,10 +40,9 @@ class Postgresql(DbProxy):
         cur = self.conn.cursor()
 
         cur.execute("select column_name from information_schema.columns where \
-        table_name='%s';" % (table_name) )
-    
+        table_name='%s';" % (table_name))
+
         rows = cur.fetchall()
         for row in rows:
-            columns.append( row[0] )
+            columns.append(row[0])
         return columns
-        
